@@ -6,15 +6,16 @@ Builds signed+encrypted PGP/MIME messages with proper Delta Chat headers.
 import email.utils
 import uuid
 
-import pgpy
-
 from .crypto import build_pgp_mime, sign_and_encrypt
 
 
 def build_encrypted_message(from_addr: str, to_addr: str, text: str,
-                            recipient_key_bytes: bytes, privkey: pgpy.PGPKey,
+                            recipient_key_bytes: bytes, privkey: dict,
                             pubkey_b64: str, display_name: str = "") -> bytes:
-    """Build a signed+encrypted Delta Chat message."""
+    """Build a signed+encrypted Delta Chat message.
+
+    privkey: parsed private key dict (from openpgp.parse_privkey)
+    """
     msg_id = f"<{uuid.uuid4()}@pydeltachat>"
     date = email.utils.formatdate(localtime=True)
     from_hdr = email.utils.formataddr((display_name, from_addr)) if display_name else from_addr

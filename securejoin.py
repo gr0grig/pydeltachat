@@ -11,8 +11,6 @@ import email.utils
 import uuid
 from email.mime.text import MIMEText
 
-import pgpy
-
 from .crypto import build_pgp_mime, sign_and_encrypt, symmetric_encrypt
 
 
@@ -41,8 +39,11 @@ def _build_inner_mime(from_addr: str, to_addr: str, display_name: str,
 
 def build_vc_pubkey(from_addr: str, to_addr: str, invite: dict,
                     pubkey_b64: str, fingerprint: str,
-                    privkey: pgpy.PGPKey, display_name: str = "") -> bytes:
-    """Build vc-pubkey (step 2): signed + symmetric-encrypted with shared secret."""
+                    privkey: dict, display_name: str = "") -> bytes:
+    """Build vc-pubkey (step 2): signed + symmetric-encrypted with shared secret.
+
+    privkey: parsed private key dict (from openpgp.parse_privkey)
+    """
     auth = invite["auth_code"]
     shared_secret = f"securejoin/{invite['fingerprint'].upper()}/{auth}"
 
@@ -60,9 +61,12 @@ def build_vc_pubkey(from_addr: str, to_addr: str, invite: dict,
 
 
 def build_vc_contact_confirm(from_addr: str, to_addr: str,
-                             recipient_key_bytes: bytes, privkey: pgpy.PGPKey,
+                             recipient_key_bytes: bytes, privkey: dict,
                              pubkey_b64: str, display_name: str = "") -> bytes:
-    """Build vc-contact-confirm (step 4): signed + public-key encrypted."""
+    """Build vc-contact-confirm (step 4): signed + public-key encrypted.
+
+    privkey: parsed private key dict (from openpgp.parse_privkey)
+    """
     inner_bytes = _build_inner_mime(
         from_addr, to_addr, display_name, pubkey_b64,
         sj_header="vc-contact-confirm",

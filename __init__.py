@@ -1,6 +1,6 @@
 """pydeltachat — native Python Delta Chat library.
 
-Uses Python standard library (imaplib, smtplib, email, ssl) + pgpy/pysequoia for PGP.
+Pure Python PGP (Ed25519/X25519/AES) — no external dependencies for crypto.
 Works with chatmail servers for instant account onboarding.
 """
 

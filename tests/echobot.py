@@ -19,10 +19,8 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
-import pgpy
-from pysequoia import Cert
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from pydeltachat import _openpgp as openpgp
 from pydeltachat.transport import IMAPConnection, SMTPConnection
 from pydeltachat.invite import generate_invite_link
 from pydeltachat.crypto import (
@@ -60,8 +58,7 @@ def main():
 
     # Load account
     data = json.loads(ACCOUNT_FILE.read_text(encoding="utf-8"))
-    cert = Cert.from_bytes(data["privkey_armor"].encode())
-    privkey, _ = pgpy.PGPKey.from_blob(data["privkey_armor"])
+    privkey = openpgp.parse_privkey(data["privkey_armor"])
 
     # Load invite, regenerate if account changed
     if INVITE_FILE.exists():
@@ -123,15 +120,18 @@ def main():
         )
         smtp.send(data["addr"], to_addr, confirm)
 
-    def send_echo(to_addr, text):
+    def send_echo_text(to_addr, text):
         reply = build_encrypted_message(
             from_addr=data["addr"], to_addr=to_addr,
-            text=f"Echo: {text.strip()}",
+            text=text,
             recipient_key_bytes=CONTACTS[to_addr.lower()],
             privkey=privkey, pubkey_b64=data["pubkey_b64"],
             display_name=data.get("display_name", ""),
         )
         smtp.send(data["addr"], to_addr, reply)
+
+    def send_echo(to_addr, text):
+        send_echo_text(to_addr, f"Echo: {text.strip()}")
 
     try:
         # Scan existing messages for contacts and pending handshakes
@@ -148,7 +148,7 @@ def main():
             if not pgp_data:
                 continue
 
-            inner = decrypt_asymmetric(pgp_data, cert)
+            inner = decrypt_asymmetric(pgp_data, privkey)
             if inner:
                 if sender_addr:
                     handshake_done.add(sender_addr.lower())
@@ -201,7 +201,7 @@ def main():
                         continue
 
                 # Private key decrypt
-                inner = decrypt_asymmetric(pgp_data, cert)
+                inner = decrypt_asymmetric(pgp_data, privkey)
                 if not inner:
                     log.info("  Could not decrypt")
                     continue
@@ -217,6 +217,12 @@ def main():
                     if key_bytes:
                         send_vc_confirm(clean, key_bytes)
                         log.info("  SecureJoin: vc-contact-confirm sent! Handshake complete.")
+                        # Send welcome message
+                        try:
+                            send_echo_text(clean, "Welcome! I'm an echo bot. Send me a message and I'll echo it back.")
+                            log.info("  Welcome message sent!")
+                        except Exception as e:
+                            log.error("  Welcome message failed: %s", e)
                     else:
                         log.warning("  SecureJoin: no key for %s, cannot confirm", clean)
                     continue

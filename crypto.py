@@ -1,14 +1,11 @@
 """PGP operations for Delta Chat.
 
-Key generation (GPG), encryption/signing (PGPy), decryption (pysequoia).
+Pure Python — uses _openpgp (Ed25519, X25519, AES) for all PGP operations.
+No external dependencies (no pgpy, pysequoia, or GPG).
 
 IMPORTANT: Keys must have NO separate signing subkey — only primary Ed25519 (sign)
 + Cv25519 subkey (encrypt). Delta Chat verifies signatures only against the
 primary key (pgp.rs:259).
-
-PGPy produces PKESK v3 + SEIPD v1 (RFC 4880) — compatible with Delta Chat.
-pysequoia produces PKESK v6 + SEIPD v2 (RFC 9580) — NOT compatible for encryption.
-pysequoia works fine for decryption.
 """
 
 from __future__ import annotations
@@ -18,19 +15,10 @@ import email
 import email.message
 import email.utils
 import logging
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
 import textwrap
 import uuid
-import warnings
 
-import pgpy
-from pysequoia import Cert, decrypt
-
-warnings.filterwarnings("ignore", message=".*compression.*not in key preferences.*")
+from . import _openpgp as openpgp
 
 log = logging.getLogger(__name__)
 
@@ -38,94 +26,20 @@ log = logging.getLogger(__name__)
 # ── Key generation ───────────────────────────────────────────────────────
 
 
-def _find_gpg() -> str:
-    """Find GPG executable."""
-    found = shutil.which("gpg")
-    if found:
-        return found
-    for candidate in [
-        r"C:\Program Files\Git\usr\bin\gpg.exe",
-        r"C:\Program Files (x86)\GnuPG\bin\gpg.exe",
-        r"C:\Program Files\GnuPG\bin\gpg.exe",
-    ]:
-        if os.path.isfile(candidate):
-            return candidate
-    raise FileNotFoundError("gpg not found. Install Git for Windows or GnuPG.")
-
-
-def _gpg_path(raw_path: str, gpg_exe: str) -> str:
-    """Convert path for GPG (Git's GPG needs Unix-style paths on Windows)."""
-    if sys.platform == "win32" and "Git" in gpg_exe:
-        if len(raw_path) > 2 and raw_path[1] == ':':
-            return "/" + raw_path[0].lower() + raw_path[2:].replace("\\", "/")
-        return raw_path.replace("\\", "/")
-    return raw_path
-
-
 def generate_key(addr: str, display_name: str = "") -> dict:
-    """Generate Ed25519 + Cv25519 key via GPG (no signing subkey).
+    """Generate Ed25519 + Cv25519 key (pure Python, no GPG).
 
     Returns dict with: fingerprint, privkey_armor, pubkey_armor, pubkey_b64
     """
-    gpg_exe = _find_gpg()
-    raw_home = tempfile.mkdtemp(prefix="pydckey_")
-    homedir = _gpg_path(raw_home, gpg_exe)
-    gpg = [gpg_exe, "--homedir", homedir]
-
-    try:
-        uid = f"{display_name} <{addr}>" if display_name else addr
-
-        # Primary Ed25519 (sign + certify)
-        r = subprocess.run(
-            gpg + ["--batch", "--passphrase", "", "--pinentry-mode", "loopback",
-                   "--quick-generate-key", uid, "ed25519", "sign", "0"],
-            capture_output=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"GPG keygen failed: {r.stderr.decode()}")
-
-        # Get fingerprint
-        r = subprocess.run(gpg + ["--batch", "--with-colons", "--list-keys"], capture_output=True)
-        fpr = None
-        for line in r.stdout.decode().split('\n'):
-            parts = line.split(':')
-            if parts[0] == 'fpr':
-                fpr = parts[9].lower()
-                break
-        if not fpr:
-            raise RuntimeError("Could not find fingerprint")
-
-        # Cv25519 encryption subkey
-        r = subprocess.run(
-            gpg + ["--batch", "--passphrase", "", "--pinentry-mode", "loopback",
-                   "--quick-add-key", fpr.upper(), "cv25519", "encr", "0"],
-            capture_output=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"GPG add subkey failed: {r.stderr.decode()}")
-
-        # Export private key
-        r = subprocess.run(
-            gpg + ["--batch", "--passphrase", "", "--pinentry-mode", "loopback",
-                   "--armor", "--export-secret-keys", fpr.upper()],
-            capture_output=True)
-        privkey_armor = r.stdout.decode()
-
-        # Export public key (armor)
-        r = subprocess.run(gpg + ["--batch", "--armor", "--export", fpr.upper()], capture_output=True)
-        pubkey_armor = r.stdout.decode()
-
-        # Export public key (binary -> base64 for Autocrypt)
-        r = subprocess.run(gpg + ["--batch", "--export", fpr.upper()], capture_output=True)
-        pubkey_b64 = base64.b64encode(r.stdout).decode()
-
-        log.info("Generated key %s for %s", fpr, addr)
-        return {
-            "fingerprint": fpr,
-            "privkey_armor": privkey_armor,
-            "pubkey_armor": pubkey_armor,
-            "pubkey_b64": pubkey_b64,
-        }
-    finally:
-        shutil.rmtree(raw_home, ignore_errors=True)
+    uid = f"{display_name} <{addr}>" if display_name else addr
+    result = openpgp.generate_key(uid)
+    log.info("Generated key %s for %s", result["fingerprint"], addr)
+    return {
+        "fingerprint": result["fingerprint"],
+        "privkey_armor": result["privkey_armor"],
+        "pubkey_armor": result["pubkey_armor"],
+        "pubkey_b64": result["pubkey_b64"],
+    }
 
 
 # ── Autocrypt ────────────────────────────────────────────────────────────
@@ -156,7 +70,7 @@ def extract_autocrypt_key(msg) -> tuple[str, bytes] | None:
         return None
     try:
         key_bytes = base64.b64decode(keydata)
-        pgpy.PGPKey.from_blob(key_bytes)  # validate
+        openpgp.parse_pubkey(key_bytes)  # validate
         return (addr, key_bytes)
     except Exception:
         return None
@@ -227,45 +141,46 @@ def extract_pgp_payload(msg) -> bytes | None:
 # ── Encrypt / Sign ───────────────────────────────────────────────────────
 
 
-def sign_and_encrypt(inner_bytes: bytes, privkey: pgpy.PGPKey,
+def sign_and_encrypt(inner_bytes: bytes, privkey: dict,
                      recipient_key_bytes: bytes) -> str:
-    """Sign with privkey + encrypt to recipient. Returns PGP armor string."""
-    recipient_key, _ = pgpy.PGPKey.from_blob(recipient_key_bytes)
-    pgp_msg = pgpy.PGPMessage.new(inner_bytes)
-    sig = privkey.sign(pgp_msg)
-    pgp_msg |= sig
-    encrypted = recipient_key.encrypt(pgp_msg)
-    return str(encrypted)
+    """Sign with privkey + encrypt to recipient. Returns PGP armor string.
+
+    privkey: parsed private key dict (from openpgp.parse_privkey)
+    recipient_key_bytes: raw public key bytes (binary OpenPGP)
+    """
+    recipient = openpgp.parse_pubkey(recipient_key_bytes)
+    return openpgp.encrypt_and_sign(inner_bytes, privkey, recipient)
 
 
 def symmetric_encrypt(inner_bytes: bytes, shared_secret: str,
-                      privkey: pgpy.PGPKey | None = None) -> str:
-    """Symmetric-encrypt (optionally signed). Returns PGP armor string."""
-    pgp_msg = pgpy.PGPMessage.new(inner_bytes)
-    if privkey:
-        sig = privkey.sign(pgp_msg)
-        pgp_msg |= sig
-    encrypted = pgp_msg.encrypt(passphrase=shared_secret)
-    return str(encrypted)
+                      privkey: dict | None = None) -> str:
+    """Symmetric-encrypt (optionally signed). Returns PGP armor string.
+
+    privkey: parsed private key dict or None
+    """
+    return openpgp.encrypt_symmetric(inner_bytes, shared_secret, signer=privkey)
 
 
 # ── Decrypt ──────────────────────────────────────────────────────────────
 
 
 def decrypt_symmetric(pgp_data: bytes, password: str) -> email.message.Message | None:
-    """Decrypt with password (pysequoia). Returns parsed MIME or None."""
+    """Decrypt with password (native). Returns parsed MIME or None."""
     try:
-        result = decrypt(pgp_data, passwords=[password])
-        return email.message_from_bytes(result.bytes)
+        plaintext = openpgp.decrypt_symmetric_msg(pgp_data, password)
+        return email.message_from_bytes(plaintext)
     except Exception:
         return None
 
 
-def decrypt_asymmetric(pgp_data: bytes, cert: Cert) -> email.message.Message | None:
-    """Decrypt with private key (pysequoia). Returns parsed MIME or None."""
+def decrypt_asymmetric(pgp_data: bytes, privkey: dict) -> email.message.Message | None:
+    """Decrypt with private key (native). Returns parsed MIME or None.
+
+    privkey: parsed private key dict (from openpgp.parse_privkey)
+    """
     try:
-        result = decrypt(pgp_data, decryptor=cert.secrets.decryptor())
-        return email.message_from_bytes(result.bytes)
+        plaintext = openpgp.decrypt_public(pgp_data, privkey)
+        return email.message_from_bytes(plaintext)
     except Exception:
         return None
 

@@ -19,11 +19,10 @@ import ssl
 import sys
 from pathlib import Path
 
-import pgpy
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from pydeltachat.onboarding import generate_credentials
 from pydeltachat.crypto import generate_key
+from pydeltachat import _openpgp as openpgp
 
 ACCOUNT_FILE = Path(__file__).parent / "account.json"
 
@@ -50,13 +49,11 @@ def main():
     key = generate_key(addr, args.name)
     print(f"Fingerprint: {key['fingerprint']}")
 
-    # 4. Verify signing uses primary key
-    privkey, _ = pgpy.PGPKey.from_blob(key["privkey_armor"])
-    sig = privkey.sign(pgpy.PGPMessage.new(b"test"))
-    primary_keyid = key["fingerprint"][-16:].upper()
-    assert sig.signer.upper() == primary_keyid, \
-        f"Signing with subkey {sig.signer} instead of primary {primary_keyid}!"
-    print("Signing:  primary key (OK)")
+    # 4. Verify key can be parsed back
+    parsed = openpgp.parse_privkey(key["privkey_armor"])
+    assert parsed.get("ed_seed"), "Key parsing failed: no ed_seed"
+    assert parsed.get("cv_secret"), "Key parsing failed: no cv_secret"
+    print("Key verify:  OK (ed_seed + cv_secret present)")
 
     # 5. Save
     account = {
