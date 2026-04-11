@@ -235,13 +235,27 @@ def _build_subpacket(sub_type: int, data: bytes) -> bytes:
 
 def _build_sig_v4(sig_type: int, ed_seed: bytes, ed_pub: bytes,
                   hash_data_prefix: bytes, creation_time: int,
-                  key_id: bytes, fp: bytes, key_flags: bytes) -> bytes:
-    """Build a v4 signature packet body."""
+                  key_id: bytes, fp: bytes, key_flags: bytes,
+                  recipient_fp: bytes = None) -> bytes:
+    """Build a v4 signature packet body.
+
+    Matches rPGP (Delta Chat) layout:
+    - Data sig (0x00): SignatureCreationTime(critical) + IntendedRecipientFingerprint + IssuerFingerprint
+    - UID cert (0x10-0x13): + Key flags + Prefs + Features
+    - Subkey binding (0x18): + Key flags
+    """
     # Hashed subpackets
     hashed = b""
-    hashed += _build_subpacket(2, creation_time.to_bytes(4, "big"))  # Creation time
-    hashed += _build_subpacket(27, key_flags)  # Key flags
-    hashed += _build_subpacket(33, b"\x04" + fp)  # Issuer fingerprint (v4)
+    # SignatureCreationTime (type 2) — rPGP marks this CRITICAL (high bit set on type byte)
+    hashed += _build_subpacket(2 | 0x80, creation_time.to_bytes(4, "big"))
+    # Data signature: include IntendedRecipientFingerprint (type 35, regular, v4 format)
+    if sig_type == 0x00 and recipient_fp is not None:
+        hashed += _build_subpacket(35, b"\x04" + recipient_fp)
+    # Key flags (type 27) — only for cert/binding sigs, NOT for data sigs
+    if sig_type != 0x00:
+        hashed += _build_subpacket(27, key_flags)
+    # Issuer fingerprint (type 33, regular)
+    hashed += _build_subpacket(33, b"\x04" + fp)
     # For UID cert: add preferences
     if sig_type in (0x10, 0x11, 0x12, 0x13):
         hashed += _build_subpacket(11, bytes([SYM_AES256]))  # Preferred symmetric
@@ -736,8 +750,10 @@ def _seipd_decrypt(session_key: bytes, data: bytes) -> bytes:
 
 
 def _build_literal_data(data: bytes) -> bytes:
-    """Build Literal Data packet (tag 11)."""
-    body = b"t\x00" + b"\x00\x00\x00\x00" + data  # 't' text format, no filename, date=0
+    """Build Literal Data packet (tag 11). Binary format, no filename, date=0.
+    Matches rPGP's MessageBuilder::from_bytes default (data_mode=Binary).
+    """
+    body = b"b\x00" + b"\x00\x00\x00\x00" + data
     return _build_packet(11, body)
 
 
@@ -775,17 +791,24 @@ def _extract_plaintext(content: bytes) -> bytes:
 
 
 def _build_onepass_sig(key_id: bytes) -> bytes:
-    """Build One-Pass Signature packet (tag 4)."""
-    body = bytes([3, 0x00, HASH_SHA256, ALGO_EDDSA]) + key_id + b"\x00"
+    """Build One-Pass Signature packet (tag 4), v3 (used for v4 keys).
+
+    Last flag = 1 (this is the final OPS, no nested sigs follow).
+    rPGP's OnePassSignature.is_nested() returns true iff last == 0, so
+    a standalone non-nested OPS MUST set last = 1.
+    """
+    body = bytes([3, 0x00, HASH_SHA256, ALGO_EDDSA]) + key_id + b"\x01"
     return _build_packet(4, body)
 
 
 def _build_inline_sig(data: bytes, ed_seed: bytes, ed_pub: bytes,
-                      creation_time: int, key_id: bytes, fp: bytes) -> bytes:
+                      creation_time: int, key_id: bytes, fp: bytes,
+                      recipient_fp: bytes = None) -> bytes:
     """Build signature packet for inline signed data."""
     body = _build_sig_v4(
         0x00, ed_seed, ed_pub, data,
-        creation_time, key_id, fp, b"\x03"  # certify + sign (used as signer flags)
+        creation_time, key_id, fp, b"\x03",
+        recipient_fp=recipient_fp,
     )
     return _build_packet(2, body)
 
@@ -801,9 +824,11 @@ def encrypt_and_sign(plaintext: bytes, signer: dict, recipient: dict) -> str:
     # Build inner content: OnePassSig + LiteralData + Signature
     lit = _build_literal_data(plaintext)
     ops = _build_onepass_sig(signer["key_id"])
+    # Pass recipient primary-key fingerprint for IntendedRecipientFingerprint subpacket
     sig = _build_inline_sig(
         plaintext, signer["ed_seed"], signer["ed_pub"],
-        now, signer["key_id"], signer["fingerprint"]
+        now, signer["key_id"], signer["fingerprint"],
+        recipient_fp=recipient.get("fingerprint"),
     )
     content = ops + lit + sig
 

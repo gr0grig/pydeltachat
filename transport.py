@@ -69,11 +69,18 @@ class IMAPConnection:
         messages = []
         for uid in uids:
             status, msg_data = self._conn.uid("fetch", uid, "(RFC822)")
-            if status == "OK" and msg_data[0] is not None:
-                raw = msg_data[0][1]
-                msg = email.message_from_bytes(raw)
-                messages.append(msg)
-                self._last_uid = uid.decode() if isinstance(uid, bytes) else uid
+            if status != "OK":
+                continue
+            raw = None
+            for item in msg_data:
+                if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], (bytes, bytearray)):
+                    raw = bytes(item[1])
+                    break
+            if raw is None:
+                continue
+            msg = email.message_from_bytes(raw)
+            messages.append(msg)
+            self._last_uid = uid.decode() if isinstance(uid, bytes) else uid
 
         return messages
 

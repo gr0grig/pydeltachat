@@ -80,8 +80,14 @@ def extract_autocrypt_key(msg) -> tuple[str, bytes] | None:
 
 
 def build_pgp_mime(encrypted_armor: bytes | str, from_addr: str, to_addr: str,
-                   pubkey_b64: str = "", subject: str = "...") -> bytes:
-    """Build PGP/MIME email (RFC 3156) from encrypted armor."""
+                   pubkey_b64: str = "", subject: str = "[...]") -> bytes:
+    """Build PGP/MIME email (RFC 3156) from encrypted armor.
+
+    Matches DC `group_headers_by_confidentiality`:
+    - Subject: "[...]"
+    - From: address-only (no display name)
+    - To: "hidden-recipients: ;"
+    """
     if isinstance(encrypted_armor, bytes):
         encrypted_armor = encrypted_armor.decode("utf-8")
     boundary = f"b-{uuid.uuid4().hex[:16]}"
@@ -93,7 +99,7 @@ def build_pgp_mime(encrypted_armor: bytes | str, from_addr: str, to_addr: str,
         "MIME-Version: 1.0",
         "Chat-Version: 1.0",
         f"From: <{from_addr}>",
-        f"To: <{to_addr}>",
+        'To: "hidden-recipients": ;',
         f"Date: {date}",
         f"Message-ID: {msg_id}",
         f"Subject: {subject}",

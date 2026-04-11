@@ -14,13 +14,16 @@ No pip packages, no GPG, no Rust compilation.
 # 1. Register a chatmail account
 python -m pydeltachat.tests.register
 
-# 2. Start the echo bot (prints invite link)
+# 2a. Start the echo bot (inviter role — prints invite link, replies to messages)
 python -m pydeltachat.tests.echobot
 
-# 3. Scan the invite link in Delta Chat
+# 2b. ...or join an existing invite and send one message (joiner role)
+python -m pydeltachat.tests.join_and_send --link "https://i.delta.chat/#..." --text "Hello!"
 ```
 
-The bot completes SecureJoin, sends a welcome message, and echoes back anything you send.
+Both test scripts accept `--debug` to dump raw MIME of every outgoing and incoming message.
+
+The echo bot completes SecureJoin (inviter side), sends a welcome message, and echoes back anything you send. `join_and_send` walks through the joiner side of the handshake and delivers a single encrypted message to the inviter.
 
 ## Library Modules
 
@@ -49,19 +52,24 @@ PGP operations: key generation, encryption, signing, decryption, Autocrypt.
 
 ### `pydeltachat.securejoin`
 
-SecureJoin v3 protocol (inviter side):
+SecureJoin v3 protocol — both joiner and inviter sides:
 
 ```
-Joiner  -> Inviter:  vc-request-pubkey    (symmetric)
-Inviter -> Joiner:   vc-pubkey            (symmetric, signed)
-Joiner  -> Inviter:  vc-request-with-auth (asymmetric, signed)
-Inviter -> Joiner:   vc-contact-confirm   (asymmetric, signed)
+Joiner  -> Inviter:  vc-request            (cleartext, legacy bootstrap)
+                 or  vc-request-pubkey     (v3, symmetric)
+Inviter -> Joiner:   vc-auth-required      (from mainline DC, cleartext)
+                 or  vc-pubkey             (v3, symmetric, signed)
+Joiner  -> Inviter:  vc-request-with-auth  (asymmetric, signed)
+Inviter -> Joiner:   vc-contact-confirm    (asymmetric, signed)
 ```
 
-| Function | Description |
-|---|---|
-| `build_vc_pubkey(...)` | Step 2: symmetric-encrypted response |
-| `build_vc_contact_confirm(...)` | Step 4: public-key encrypted confirmation |
+| Function | Role | Description |
+|---|---|---|
+| `build_vc_request(...)` | joiner | Step 1 (legacy cleartext bootstrap) |
+| `build_vc_request_pubkey(...)` | joiner | Step 1 (v3 symmetric-encrypted bootstrap) |
+| `build_vc_pubkey(...)` | inviter | Step 2 (v3 symmetric-encrypted, signed, carries Autocrypt key) |
+| `build_vc_request_with_auth(...)` | joiner | Step 3 (public-key encrypted, signed, carries auth code) |
+| `build_vc_contact_confirm(...)` | inviter | Step 4 (public-key encrypted, signed confirmation) |
 
 ### `pydeltachat.invite`
 
@@ -106,16 +114,23 @@ Output format: PKESK v3 + SEIPD v1 (RFC 4880) — fully compatible with Delta Ch
 
 ### Key structure
 
-Delta Chat verifies signatures only against the primary key. Keys must have:
+Delta Chat verifies signatures only against the primary key (`pgp.rs:259`). Keys must have:
 
 - **Primary**: Ed25519 (sign + certify)
 - **Subkey**: Cv25519 (encrypt only)
-- **No signing subkey**
+- **No signing subkey** — if one exists, PGPy/GPG prefers it over the primary, and DC's signature check fails silently (no padlock).
 
 ### S2K type for SecureJoin
 
-Delta Chat's `check_symmetric_encryption` only accepts **S2K type 1 (Salted)**. Standard S2K type 3 (Iterated+Salted) is rejected. This library uses S2K type 1 for symmetric encryption.
+Delta Chat's `check_symmetric_encryption` only accepts **S2K type 1 (Salted)**. Standard S2K type 3 (Iterated+Salted) — the default in both `pgpy` and most OpenPGP libraries — is rejected with `"unsupported string2key algorithm"`. This library uses S2K type 1 for all symmetric encryption.
 
 ### Decryption compatibility
 
 Handles both RFC 4880 (PKESK v3, SEIPD v1) and RFC 9580 (PKESK v6, SEIPD v2 with OCB/AEAD) — can decrypt messages from any Delta Chat version.
+
+### Autocrypt + SecureJoin
+
+Two layers of trust:
+
+- **Autocrypt** — opportunistic TOFU: the first public key seen for an address is trusted. Implemented via `fold_autocrypt_header()` / `extract_autocrypt_key()`. Vulnerable to an active MITM on the very first contact.
+- **SecureJoin v3** — out-of-band fingerprint verification via an invite link containing the inviter's fingerprint + shared secret. Closes the first-contact MITM hole. This is what produces the verified (green-checkmark) state in Delta Chat UI.
